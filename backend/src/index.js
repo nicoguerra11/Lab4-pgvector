@@ -49,6 +49,9 @@ const GENRE_KEYWORDS = {
   tvmovie:     ["tv movie", "telefilm", "película de tv"],
   war:         ["guerra", "bélica", "belica", "military", "soldados", "guerra mundial"],
   western:     ["western", "vaqueros", "oeste", "cowboy", "far west"],
+  // "ficción" sola en español significa "narrativa" (opuesto a documental),
+  // NO "ciencia ficción" — capturarla aquí evita el fallback por resultado.
+  general:     ["ficcion", "ficción", "narrativa", "ficcion dramatica", "ficción dramática"],
 };
 
 const GENRE_PREAMBLES = {
@@ -128,7 +131,13 @@ function detectGenre(query, movies = []) {
     }
   }
   const topGenre = Object.entries(counts).sort((a, b) => b[1] - a[1])[0]?.[0];
-  return GENRE_DB_MAP[topGenre] || "general";
+  const mapped   = GENRE_DB_MAP[topGenre] || "general";
+
+  // Evitar recomendar en tono "documental" si el usuario no lo pidió explícitamente
+  if (mapped === "documentary" && !GENRE_KEYWORDS.documentary.some((kw) => q.includes(kw))) {
+    return "general";
+  }
+  return mapped;
 }
 
 // ─── GET / ──────────────────────────────────────────────────────────────────────
@@ -170,7 +179,7 @@ app.get("/api/health", async (_req, res) => {
 
 // ─── POST /api/chat ─────────────────────────────────────────────────────────────
 app.post("/api/chat", async (req, res) => {
-  const { query } = req.body;
+  const { query, chatHistory = [] } = req.body;
 
   if (!query || typeof query !== "string" || !query.trim()) {
     return res.status(400).json({ error: "El campo 'query' es requerido." });
@@ -186,24 +195,38 @@ app.post("/api/chat", async (req, res) => {
     });
     const queryVector = embResult.embeddings[0];
 
-    // 2. Top-5 por similitud coseno
     client = await pool.connect();
-    const { rows: movies } = await client.query(
-      `SELECT
-         id, title, overview, genres, keywords,
-         release_year, vote_average, vote_count, popularity,
-         1 - (embedding <=> $1::vector) AS similarity
-       FROM   movies
-       WHERE  embedding IS NOT NULL
-       ORDER  BY embedding <=> $1::vector
-       LIMIT  5`,
-      [`[${queryVector.join(",")}]`]
-    );
+
+    // 2. Vector search + text search en paralelo
+    const safe = query.trim().replace(/[%_\\]/g, "\\$&");
+    const [vectorResult, textResult] = await Promise.all([
+      client.query(
+        `SELECT id, title, overview, genres, keywords,
+                release_year, vote_average, vote_count, popularity,
+                1 - (embedding <=> $1::vector) AS similarity
+         FROM   movies WHERE embedding IS NOT NULL
+         ORDER  BY embedding <=> $1::vector LIMIT 5`,
+        [`[${queryVector.join(",")}]`]
+      ),
+      client.query(
+        `SELECT id, title, overview, genres, release_year,
+                vote_average, vote_count, popularity
+         FROM   movies
+         WHERE  title ILIKE $1 OR overview ILIKE $1
+         ORDER  BY popularity DESC NULLS LAST LIMIT 5`,
+        [`%${safe}%`]
+      ),
+    ]);
+
+    const movies     = vectorResult.rows;
+    const textMovies = textResult.rows;
 
     if (movies.length === 0) {
       return res.json({
-        response: "No encontré películas en la base de datos. Asegurate de haber corrido el script de ingest.",
-        movies:   [],
+        response:    "No encontré películas en la base de datos.",
+        movies:      [],
+        textMovies:  [],
+        chatHistory: chatHistory,
       });
     }
 
@@ -222,35 +245,52 @@ app.post("/api/chat", async (req, res) => {
       })
       .join("\n\n");
 
-    // 4. Detectar género y elegir preamble dinámico
+    // 4. Detectar género y preamble
     const detectedGenre = detectGenre(query.trim(), movies);
     const preamble      = GENRE_PREAMBLES[detectedGenre] || GENRE_PREAMBLES.general;
-
     console.log(`[/api/chat] género detectado: ${detectedGenre}`);
 
-    // 5. Llamar al LLM
+    // 5. Historial para Cohere (últimas 6 entradas = 3 turnos)
+    const trimmedHistory = chatHistory.slice(-6);
+    const cohereHistory  = trimmedHistory.map((h) => ({
+      role:    h.role === "user" ? "USER" : "CHATBOT",
+      message: h.message,
+    }));
+
+    // 6. Llamar al LLM con historial
     const chatResponse = await cohere.chat({
-      model:    "command-r-plus-08-2024",
+      model:       "command-r-plus-08-2024",
       preamble,
-      message:  `El usuario busca: "${query.trim()}"\n\nPelículas relevantes:\n\n${context}`,
+      chatHistory: cohereHistory,
+      message:     `El usuario busca: "${query.trim()}"\n\nPelículas relevantes:\n\n${context}`,
     });
 
-    // 6. Respuesta
+    // 7. Historial actualizado para el frontend
+    const updatedHistory = [
+      ...trimmedHistory,
+      { role: "user",      message: query.trim() },
+      { role: "assistant", message: chatResponse.text },
+    ];
+
+    const fmt = (m) => ({
+      id:           m.id,
+      title:        m.title,
+      overview:     m.overview,
+      genres:       m.genres,
+      keywords:     m.keywords || [],
+      release_year: m.release_year,
+      vote_average: parseFloat(m.vote_average),
+      vote_count:   m.vote_count,
+      popularity:   parseFloat(m.popularity),
+      similarity:   parseFloat(parseFloat(m.similarity ?? 0).toFixed(4)),
+    });
+
     res.json({
-      response: chatResponse.text,
-      genre:    detectedGenre,
-      movies:   movies.map((m) => ({
-        id:           m.id,
-        title:        m.title,
-        overview:     m.overview,
-        genres:       m.genres,
-        keywords:     m.keywords,
-        release_year: m.release_year,
-        vote_average: parseFloat(m.vote_average),
-        vote_count:   m.vote_count,
-        popularity:   parseFloat(m.popularity),
-        similarity:   parseFloat(parseFloat(m.similarity).toFixed(4)),
-      })),
+      response:    chatResponse.text,
+      genre:       detectedGenre,
+      movies:      movies.map(fmt),
+      textMovies:  textMovies.map((m) => ({ ...fmt(m), similarity: undefined })),
+      chatHistory: updatedHistory,
     });
   } catch (err) {
     console.error("[/api/chat] Error:", err.message);
@@ -262,15 +302,44 @@ app.post("/api/chat", async (req, res) => {
 
 // ─── GET /api/movies ────────────────────────────────────────────────────────────
 app.get("/api/movies", async (req, res) => {
-  const page   = Math.max(1, parseInt(req.query.page,  10) || 1);
-  const limit  = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 20));
-  const search = (req.query.search || "").trim();
-  const offset = (page - 1) * limit;
+  const page      = Math.max(1, parseInt(req.query.page,  10) || 1);
+  const limit     = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 20));
+  const search    = (req.query.search   || "").trim();
+  const genre     = (req.query.genre    || "").trim();
+  const yearFrom  = parseInt(req.query.yearFrom,  10) || null;
+  const yearTo    = parseInt(req.query.yearTo,    10) || null;
+  const minRating = parseFloat(req.query.minRating)   || null;
+  const offset    = (page - 1) * limit;
 
-  const dataWhere   = search ? "WHERE title ILIKE $3" : "";
-  const countWhere  = search ? "WHERE title ILIKE $1" : "";
-  const dataParams  = search ? [limit, offset, `%${search}%`] : [limit, offset];
-  const countParams = search ? [`%${search}%`] : [];
+  // Build dynamic WHERE
+  const conditions   = [];
+  const filterParams = [];
+
+  if (search) {
+    filterParams.push(`%${search}%`);
+    conditions.push(`title ILIKE $${filterParams.length}`);
+  }
+  if (genre) {
+    filterParams.push(genre);
+    conditions.push(`EXISTS(SELECT 1 FROM unnest(genres) AS g WHERE g ILIKE $${filterParams.length})`);
+  }
+  if (yearFrom) {
+    filterParams.push(yearFrom);
+    conditions.push(`release_year >= $${filterParams.length}`);
+  }
+  if (yearTo) {
+    filterParams.push(yearTo);
+    conditions.push(`release_year <= $${filterParams.length}`);
+  }
+  if (minRating) {
+    filterParams.push(minRating);
+    conditions.push(`vote_average >= $${filterParams.length}`);
+  }
+
+  const whereClause = conditions.length ? "WHERE " + conditions.join(" AND ") : "";
+  const dataParams  = [...filterParams, limit, offset];
+  const li          = filterParams.length + 1;
+  const oi          = filterParams.length + 2;
 
   let client;
   try {
@@ -280,15 +349,14 @@ app.get("/api/movies", async (req, res) => {
       client.query(
         `SELECT id, title, overview, genres, release_year,
                 vote_average, vote_count, popularity
-         FROM   movies
-         ${dataWhere}
+         FROM   movies ${whereClause}
          ORDER  BY popularity DESC NULLS LAST
-         LIMIT  $1 OFFSET $2`,
+         LIMIT  $${li} OFFSET $${oi}`,
         dataParams
       ),
       client.query(
-        `SELECT COUNT(*) AS total FROM movies ${countWhere}`,
-        countParams
+        `SELECT COUNT(*) AS total FROM movies ${whereClause}`,
+        filterParams
       ),
     ]);
 
@@ -301,6 +369,83 @@ app.get("/api/movies", async (req, res) => {
   } catch (err) {
     console.error("[/api/movies] Error:", err.message);
     res.status(500).json({ error: "Error al consultar películas.", detail: err.message });
+  } finally {
+    if (client) client.release();
+  }
+});
+
+// ─── GET /api/movies/:id/similar ────────────────────────────────────────────────
+app.get("/api/movies/:id/similar", async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!id || isNaN(id)) return res.status(400).json({ error: "ID inválido" });
+
+  let client;
+  try {
+    client = await pool.connect();
+    const { rows } = await client.query(
+      `SELECT id, title, overview, genres, release_year,
+              vote_average, vote_count, popularity,
+              1 - (embedding <=> (SELECT embedding FROM movies WHERE id = $1)) AS similarity
+       FROM   movies
+       WHERE  id != $1 AND embedding IS NOT NULL
+       ORDER  BY embedding <=> (SELECT embedding FROM movies WHERE id = $1)
+       LIMIT  6`,
+      [id]
+    );
+    res.json({
+      movies: rows.map((m) => ({
+        id:           m.id,
+        title:        m.title,
+        overview:     m.overview,
+        genres:       m.genres,
+        release_year: m.release_year,
+        vote_average: parseFloat(m.vote_average),
+        popularity:   parseFloat(m.popularity),
+        similarity:   parseFloat(parseFloat(m.similarity).toFixed(4)),
+      })),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  } finally {
+    if (client) client.release();
+  }
+});
+
+// ─── GET /api/stats ──────────────────────────────────────────────────────────────
+app.get("/api/stats", async (_req, res) => {
+  let client;
+  try {
+    client = await pool.connect();
+    const [genreRows, decadeRows, topPop, topRated, totalRow] = await Promise.all([
+      client.query(`
+        SELECT g AS genre, COUNT(*) AS count
+        FROM   movies, unnest(genres) AS g
+        GROUP  BY g ORDER BY count DESC LIMIT 15`),
+      client.query(`
+        SELECT (release_year / 10 * 10) AS decade, COUNT(*) AS count
+        FROM   movies
+        WHERE  release_year IS NOT NULL AND release_year BETWEEN 1900 AND 2030
+        GROUP  BY decade ORDER BY decade`),
+      client.query(`
+        SELECT id, title, popularity, vote_average
+        FROM   movies WHERE popularity IS NOT NULL
+        ORDER  BY popularity DESC LIMIT 10`),
+      client.query(`
+        SELECT id, title, vote_average, vote_count
+        FROM   movies WHERE vote_count >= 100 AND vote_average IS NOT NULL
+        ORDER  BY vote_average DESC LIMIT 10`),
+      client.query("SELECT COUNT(*) AS total FROM movies"),
+    ]);
+
+    res.json({
+      total:             parseInt(totalRow.rows[0].total, 10),
+      genreDistribution: genreRows.rows.map((r) => ({ genre: r.genre, count: parseInt(r.count, 10) })),
+      byDecade:          decadeRows.rows.map((r) => ({ decade: parseInt(r.decade, 10), count: parseInt(r.count, 10) })),
+      topByPopularity:   topPop.rows.map((r) => ({ id: r.id, title: r.title, popularity: parseFloat(r.popularity), vote_average: parseFloat(r.vote_average) })),
+      topByRating:       topRated.rows.map((r) => ({ id: r.id, title: r.title, vote_average: parseFloat(r.vote_average), vote_count: r.vote_count })),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   } finally {
     if (client) client.release();
   }
