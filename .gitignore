@@ -1,0 +1,12 @@
+# Datos pesados — no subir al repo
+data/*.csv
+
+# Artefactos macOS
+__MACOSX
+.DS_Store
+
+# Dependencias Node
+node_modules/
+
+# Variables de entorno
+.env

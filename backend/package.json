@@ -1,0 +1,19 @@
+{
+  "name": "pgvector-movie-backend",
+  "version": "1.0.0",
+  "description": "Node.js backend con PostgreSQL + pgvector para recomendación de películas.",
+  "main": "src/index.js",
+  "scripts": {
+    "start":  "node src/index.js",
+    "dev":    "node --watch src/index.js",
+    "ingest": "node src/ingest.js"
+  },
+  "dependencies": {
+    "cohere-ai": "^7.14.0",
+    "cors":      "^2.8.5",
+    "csv-parse": "^5.6.0",
+    "dotenv":    "^16.4.7",
+    "express":   "^4.21.2",
+    "pg":        "^8.13.1"
+  }
+}

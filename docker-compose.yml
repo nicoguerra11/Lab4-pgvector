@@ -1,0 +1,53 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: pgvector_movie_db
+    environment:
+      POSTGRES_USER:     app_user
+      POSTGRES_PASSWORD: app_password
+      POSTGRES_DB:       app_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgvector_data:/var/lib/postgresql/data
+      - ./database/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test:     ["CMD-SHELL", "pg_isready -U app_user -d app_db"]
+      interval: 5s
+      timeout:  5s
+      retries:  10
+
+  backend:
+    build:
+      context: ./backend
+    container_name: pgvector_movie_backend
+    environment:
+      PORT:              3001
+      PGHOST:            db
+      PGPORT:            5432
+      PGDATABASE:        app_db
+      PGUSER:            app_user
+      PGPASSWORD:        app_password
+      CORS_ORIGIN:       http://localhost:5173
+      COHERE_API_KEY: ${COHERE_API_KEY}   # exportar en el host o poner en .env
+    ports:
+      - "3001:3001"
+    volumes:
+      - ./data:/app/data:ro   # para que ingest.js acceda al CSV dentro del contenedor
+    depends_on:
+      db:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+    container_name: pgvector_movie_frontend
+    environment:
+      VITE_API_URL: http://localhost:3001/api
+    ports:
+      - "5173:5173"
+    depends_on:
+      - backend
+
+volumes:
+  pgvector_data:
