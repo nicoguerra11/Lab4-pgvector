@@ -21,7 +21,8 @@ const { CohereClient } = require("cohere-ai");
 const DATA_PATH = process.env.DATA_PATH ||
   path.resolve(__dirname, "..", "..", "data", "tmdb_5000_movies.csv");
 
-const BATCH_SIZE = 50; // seguro por debajo del límite de Cohere (96)
+const BATCH_SIZE   = 50;  // seguro por debajo del límite de Cohere (96)
+const BATCH_DELAY  = 6000; // ms entre batches — tier free: 100k tokens/min
 
 const cohere = new CohereClient({ token: process.env.COHERE_API_KEY });
 
@@ -58,6 +59,8 @@ function buildText(movie) {
     .filter(Boolean)
     .join(" ");
 }
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /** Llama a embed-multilingual-v3.0 y devuelve array de embeddings para el batch */
 async function generateEmbeddings(texts) {
@@ -109,6 +112,7 @@ async function main() {
       // 3a. Generar embeddings para todo el batch de una sola llamada
       const texts      = batch.map(buildText);
       const embeddings = await generateEmbeddings(texts);
+      await sleep(BATCH_DELAY); // respetar rate limit del tier gratuito
 
       // 3b. Insertar cada película
       for (let j = 0; j < batch.length; j++) {

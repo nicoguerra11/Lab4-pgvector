@@ -119,7 +119,7 @@ app.post("/api/chat", async (req, res) => {
 
     // 4. Llamar al LLM con el contexto
     const chatResponse = await cohere.chat({
-      model:    "command-r-plus",
+      model:    "command-r-plus-08-2024",
       preamble: `Sos un experto en cine que recomienda películas de manera conversacional, en español rioplatense.
 Recibirás una consulta del usuario y un listado de películas obtenidas por búsqueda vectorial de similitud.
 Tu tarea es recomendar esas películas de forma natural y entusiasta, justificando brevemente por qué cada una encaja con la búsqueda.

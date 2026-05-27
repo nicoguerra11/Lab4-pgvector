@@ -28,12 +28,13 @@ services:
       PGDATABASE:        app_db
       PGUSER:            app_user
       PGPASSWORD:        app_password
-      CORS_ORIGIN:       http://localhost:5173
-      COHERE_API_KEY: ${COHERE_API_KEY}   # exportar en el host o poner en .env
+      CORS_ORIGIN:       http://localhost:5174
+      COHERE_API_KEY:    ${COHERE_API_KEY}
+      DATA_PATH:         /data/tmdb_5000_movies.csv
     ports:
       - "3001:3001"
     volumes:
-      - ./data:/app/data:ro   # para que ingest.js acceda al CSV dentro del contenedor
+      - ./data:/data:ro   # montado en /data para que ingest.js lo encuentre
     depends_on:
       db:
         condition: service_healthy
@@ -45,7 +46,7 @@ services:
     environment:
       VITE_API_URL: http://localhost:3001/api
     ports:
-      - "5173:5173"
+      - "5174:5173"
     depends_on:
       - backend
 
