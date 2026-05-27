@@ -9,7 +9,7 @@ const app  = express();
 const port = Number(process.env.PORT || 3001);
 
 app.use(express.json());
-app.use(cors({ origin: process.env.CORS_ORIGIN || "http://localhost:5173" }));
+app.use(cors({ origin: process.env.CORS_ORIGIN || "http://localhost:5174" }));
 
 // ─── DB pool ────────────────────────────────────────────────────────────────────
 const pool = new Pool({
@@ -25,6 +25,111 @@ const pool = new Pool({
 
 // ─── Cohere client ──────────────────────────────────────────────────────────────
 const cohere = new CohereClient({ token: process.env.COHERE_API_KEY });
+
+// ─── Detección de género y preambles ────────────────────────────────────────────
+
+const GENRE_KEYWORDS = {
+  action:      ["acción", "accion", "action", "pelea", "lucha", "explosión", "adrenalina", "combate", "batalla"],
+  adventure:   ["aventura", "adventure", "exploración", "expedición", "viaje épico"],
+  animation:   ["animación", "animacion", "animation", "cartoon", "animada", "pixar", "disney"],
+  comedy:      ["comedia", "comedy", "gracioso", "divertida", "humor", "risa", "chistosa", "cómica"],
+  crime:       ["crimen", "crime", "policial", "detective", "robo", "mafia", "delito", "gangster"],
+  documentary: ["documental", "documentary", "historia real", "basada en hechos reales"],
+  drama:       ["drama", "dramática", "emocional", "sentimental", "profunda", "reflexiva"],
+  family:      ["familia", "family", "niños", "infantil", "para chicos", "para toda la familia"],
+  fantasy:     ["fantasía", "fantasia", "fantasy", "magia", "mágica", "dragones", "hechicero"],
+  foreign:     ["extranjera", "foreign", "cine europeo", "cine asiático", "subtitulada"],
+  history:     ["histórica", "historica", "history", "época", "antigua", "guerra mundial", "medieval"],
+  horror:      ["terror", "horror", "miedo", "susto", "aterrador", "scary", "fantasma", "zombies"],
+  music:       ["música", "musica", "music", "musical", "cantante", "banda"],
+  mystery:     ["misterio", "mystery", "enigma", "secreto", "intriga", "quién lo hizo"],
+  romance:     ["romance", "romántica", "romantica", "amor", "amorosa", "pareja"],
+  scifi:       ["ciencia ficción", "ciencia ficcion", "sci-fi", "futuro", "robots", "alien", "espacio", "naves espaciales"],
+  thriller:    ["thriller", "suspenso", "suspense", "tensión", "intriga policial"],
+  tvmovie:     ["tv movie", "telefilm", "película de tv"],
+  war:         ["guerra", "bélica", "belica", "military", "soldados", "guerra mundial"],
+  western:     ["western", "vaqueros", "oeste", "cowboy", "far west"],
+};
+
+const GENRE_PREAMBLES = {
+  action:
+    "Sos un crítico de cine especializado en películas de acción. Respondé con energía y entusiasmo explosivo. Usá lenguaje dinámico: destacá la adrenalina, las persecuciones y el ritmo trepidante. Respondé en español rioplatense.",
+  adventure:
+    "Sos un crítico de cine aventurero. Respondé con emoción y espíritu explorador. Destacá los paisajes épicos, los desafíos y la sensación de aventura. Respondé en español rioplatense.",
+  animation:
+    "Sos un crítico especializado en animación. Respondé con alegría desbordante. Destacá la magia visual, los personajes entrañables y los mensajes que dejan estas películas. Respondé en español rioplatense.",
+  comedy:
+    "Sos un crítico de cine con mucho humor. Respondé de forma divertida y descontracturada. Si podés hacer algún chiste relacionado con las pelis, dale. Respondé en español rioplatense.",
+  crime:
+    "Sos un crítico especializado en cine policial. Respondé con tono serio y analítico, como un detective. Destacá los giros de trama, la tensión y los personajes complejos. Respondé en español rioplatense.",
+  documentary:
+    "Sos un apasionado de los documentales. Respondé con tono informativo y comprometido. Explicá por qué el tema de cada documental importa y vale la pena verlo. Respondé en español rioplatense.",
+  drama:
+    "Sos un crítico que aprecia el drama humano. Respondé con sensibilidad y reflexión. Destacá el impacto emocional, los temas universales y el desarrollo de personajes. Respondé en español rioplatense.",
+  family:
+    "Sos un crítico de cine familiar. Respondé con calidez y entusiasmo. Destacá los valores, los momentos divertidos y lo que disfruta toda la familia. Respondé en español rioplatense.",
+  fantasy:
+    "Sos un crítico especializado en fantasía. Respondé con imaginación desbordante y asombro. Describí los mundos mágicos y las aventuras épicas como si fueran reales. Respondé en español rioplatense.",
+  foreign:
+    "Sos un crítico cinéfilo especializado en cine internacional. Respondé con entusiasmo cultural. Destacá la perspectiva única que aporta cada país o cultura al cine mundial. Respondé en español rioplatense.",
+  history:
+    "Sos un crítico apasionado por el cine histórico. Respondé con tono culto e informativo. Destacá el contexto histórico y lo que se aprende de cada época representada. Respondé en español rioplatense.",
+  horror:
+    "Sos un crítico experto en terror. Respondé con tono oscuro, misterioso y tenso. Describí las películas de forma que genere suspenso sin spoilear el final. Respondé en español rioplatense.",
+  music:
+    "Sos un crítico apasionado por la música y los musicales. Respondé con ritmo y pasión. Destacá las bandas sonoras, las actuaciones y la energía musical. Respondé en español rioplatense.",
+  mystery:
+    "Sos un crítico especializado en misterio. Respondé con tono enigmático e intrigante. Dejá pistas sobre la trama sin revelar demasiado, haciendo que el usuario quiera descubrirlo. Respondé en español rioplatense.",
+  romance:
+    "Sos un crítico romántico. Respondé con calidez y un toque poético. Destacá las historias de amor, los momentos emotivos y la química entre personajes. Respondé en español rioplatense.",
+  scifi:
+    "Sos un crítico apasionado por la ciencia ficción. Respondé con entusiasmo intelectual y visión futurista. Destacá los conceptos científicos, filosóficos y las preguntas que plantea cada película. Respondé en español rioplatense.",
+  thriller:
+    "Sos un crítico especializado en thrillers. Respondé con tensión y urgencia, como si el tiempo se acabara. Hacé sentir al usuario la adrenalina del suspenso. Respondé en español rioplatense.",
+  tvmovie:
+    "Sos un crítico especializado en películas para televisión. Respondé de forma accesible y cercana. Destacá lo que hace especial a cada historia televisiva. Respondé en español rioplatense.",
+  war:
+    "Sos un crítico especializado en cine bélico. Respondé con solemnidad y respeto, destacando el sacrificio humano, la valentía y la crudeza de la guerra. Respondé en español rioplatense.",
+  western:
+    "Sos un crítico especializado en westerns. Respondé directo y con carácter, como el viejo oeste. Destacá los duelos, los paisajes áridos y los personajes de ley y fuera de la ley. Respondé en español rioplatense.",
+  general:
+    "Sos un experto en cine que recomienda películas de manera conversacional y entusiasta. Respondé en español rioplatense.",
+};
+
+// Mapeo de nombres de género en inglés (como están en la BD) a claves internas
+const GENRE_DB_MAP = {
+  "action": "action", "adventure": "adventure", "animation": "animation",
+  "comedy": "comedy", "crime": "crime", "documentary": "documentary",
+  "drama": "drama", "family": "family", "fantasy": "fantasy",
+  "foreign": "foreign", "history": "history", "horror": "horror",
+  "music": "music", "mystery": "mystery", "romance": "romance",
+  "science fiction": "scifi", "thriller": "thriller", "tv movie": "tvmovie",
+  "war": "war", "western": "western",
+};
+
+/**
+ * Detecta el género principal a partir del texto de la query
+ * y, como fallback, del género más frecuente en las películas recuperadas.
+ */
+function detectGenre(query, movies = []) {
+  const q = query.toLowerCase();
+
+  // 1. Buscar coincidencia en el texto de la query
+  for (const [genre, keywords] of Object.entries(GENRE_KEYWORDS)) {
+    if (keywords.some((kw) => q.includes(kw))) return genre;
+  }
+
+  // 2. Fallback: género más frecuente entre las películas recuperadas
+  const counts = {};
+  for (const movie of movies) {
+    for (const g of Array.isArray(movie.genres) ? movie.genres : []) {
+      const key = g.toLowerCase();
+      counts[key] = (counts[key] || 0) + 1;
+    }
+  }
+  const topGenre = Object.entries(counts).sort((a, b) => b[1] - a[1])[0]?.[0];
+  return GENRE_DB_MAP[topGenre] || "general";
+}
 
 // ─── GET / ──────────────────────────────────────────────────────────────────────
 app.get("/", (_req, res) => {
@@ -73,7 +178,7 @@ app.post("/api/chat", async (req, res) => {
 
   let client;
   try {
-    // 1. Generar embedding de la query (inputType: "search_query" para búsqueda)
+    // 1. Embedding de la query
     const embResult = await cohere.embed({
       texts:     [query.trim()],
       model:     "embed-multilingual-v3.0",
@@ -81,7 +186,7 @@ app.post("/api/chat", async (req, res) => {
     });
     const queryVector = embResult.embeddings[0];
 
-    // 2. Buscar top-5 más similares por distancia coseno
+    // 2. Top-5 por similitud coseno
     client = await pool.connect();
     const { rows: movies } = await client.query(
       `SELECT
@@ -102,7 +207,7 @@ app.post("/api/chat", async (req, res) => {
       });
     }
 
-    // 3. Construir contexto para el LLM
+    // 3. Contexto para el LLM
     const context = movies
       .map((m, i) => {
         const genres   = Array.isArray(m.genres)   ? m.genres.join(", ")   : "N/D";
@@ -117,20 +222,23 @@ app.post("/api/chat", async (req, res) => {
       })
       .join("\n\n");
 
-    // 4. Llamar al LLM con el contexto
+    // 4. Detectar género y elegir preamble dinámico
+    const detectedGenre = detectGenre(query.trim(), movies);
+    const preamble      = GENRE_PREAMBLES[detectedGenre] || GENRE_PREAMBLES.general;
+
+    console.log(`[/api/chat] género detectado: ${detectedGenre}`);
+
+    // 5. Llamar al LLM
     const chatResponse = await cohere.chat({
       model:    "command-r-plus-08-2024",
-      preamble: `Sos un experto en cine que recomienda películas de manera conversacional, en español rioplatense.
-Recibirás una consulta del usuario y un listado de películas obtenidas por búsqueda vectorial de similitud.
-Tu tarea es recomendar esas películas de forma natural y entusiasta, justificando brevemente por qué cada una encaja con la búsqueda.
-Para cada recomendación mencioná: el título, el año, el género principal y un dato concreto de la sinopsis que la conecte con lo pedido.
-Limitá tu respuesta a las películas del contexto. Sé conciso pero cálido.`,
+      preamble,
       message:  `El usuario busca: "${query.trim()}"\n\nPelículas relevantes:\n\n${context}`,
     });
 
-    // 5. Retornar respuesta + metadatos de películas
+    // 6. Respuesta
     res.json({
       response: chatResponse.text,
+      genre:    detectedGenre,
       movies:   movies.map((m) => ({
         id:           m.id,
         title:        m.title,
@@ -159,7 +267,6 @@ app.get("/api/movies", async (req, res) => {
   const search = (req.query.search || "").trim();
   const offset = (page - 1) * limit;
 
-  // Parámetros separados para data query y count query (posiciones distintas)
   const dataWhere   = search ? "WHERE title ILIKE $3" : "";
   const countWhere  = search ? "WHERE title ILIKE $1" : "";
   const dataParams  = search ? [limit, offset, `%${search}%`] : [limit, offset];
