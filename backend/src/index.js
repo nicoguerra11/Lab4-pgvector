@@ -99,6 +99,21 @@ const GENRE_PREAMBLES = {
     "Sos un experto en cine que recomienda películas de manera conversacional y entusiasta. Respondé en español rioplatense.",
 };
 
+// Mapeo de clave interna → nombre exacto del género en la BD
+const GENRE_TO_DB_NAME = {
+  action:      "Action",       adventure:   "Adventure",
+  animation:   "Animation",    comedy:      "Comedy",
+  crime:       "Crime",        documentary: "Documentary",
+  drama:       "Drama",        family:      "Family",
+  fantasy:     "Fantasy",      foreign:     "Foreign",
+  history:     "History",      horror:      "Horror",
+  music:       "Music",        mystery:     "Mystery",
+  romance:     "Romance",      scifi:       "Science Fiction",
+  thriller:    "Thriller",     tvmovie:     "TV Movie",
+  war:         "War",          western:     "Western",
+  general:     "",
+};
+
 // Mapeo de nombres de género en inglés (como están en la BD) a claves internas
 const GENRE_DB_MAP = {
   "action": "action", "adventure": "adventure", "animation": "animation",
@@ -124,6 +139,13 @@ function levenshtein(a, b) {
   return dp[m][n];
 }
 
+// Palabras comunes sobre cine que NO deben ser corregidas a keywords de género
+const CORRECTION_STOPLIST = new Set([
+  "pelicula","peliculas","película","películas","movie","movies","film","films",
+  "serie","series","show","shows","busco","quiero","dame","alguna","alguno",
+  "algunos","algunas","tenes","tienes","tengo","recomendar","buscar","ver",
+]);
+
 /**
  * Corrige typos en la query reemplazando palabras cercanas a keywords de género.
  * Devuelve la query corregida y si hubo cambios.
@@ -133,6 +155,7 @@ function correctTypos(query) {
   const corrections = [];
   const fixed = words.map((word) => {
     if (word.length < 4) return word;
+    if (CORRECTION_STOPLIST.has(word)) return word;   // nunca corregir palabras comunes
     // Tolerancia escalonada: palabras más largas admiten más errores
     const maxDist = word.length >= 8 ? 3 : word.length >= 6 ? 2 : 1;
     for (const keywords of Object.values(GENRE_KEYWORDS)) {
@@ -267,17 +290,25 @@ app.post("/api/chat", async (req, res) => {
 
     client = await pool.connect();
 
-    // 3. Vector search + text search en paralelo
+    // 3. Detectar género desde el texto (sin fallback de películas) para el filtro
+    const genreForFilter  = detectGenre(correctedQuery, []);
+    const dbGenreFilter   = GENRE_TO_DB_NAME[genreForFilter] || "";
+    const hasGenreFilter  = dbGenreFilter !== "";
+    console.log(`[/api/chat] filtro de género: "${dbGenreFilter || "ninguno"}"`);
+
+    // 4. Vector search híbrido + text search en paralelo
     const safe = query.trim().replace(/[%_\\]/g, "\\$&");
+    const vectorSql = `
+      SELECT id, title, overview, genres, keywords,
+             release_year, vote_average, vote_count, popularity,
+             1 - (embedding <=> $1::vector) AS similarity
+      FROM   movies
+      WHERE  embedding IS NOT NULL
+        AND  ($2 = '' OR $2 ILIKE ANY(genres))
+      ORDER  BY embedding <=> $1::vector LIMIT 5`;
+
     const [vectorResult, textResult] = await Promise.all([
-      client.query(
-        `SELECT id, title, overview, genres, keywords,
-                release_year, vote_average, vote_count, popularity,
-                1 - (embedding <=> $1::vector) AS similarity
-         FROM   movies WHERE embedding IS NOT NULL
-         ORDER  BY embedding <=> $1::vector LIMIT 5`,
-        [`[${queryVector.join(",")}]`]
-      ),
+      client.query(vectorSql, [`[${queryVector.join(",")}]`, dbGenreFilter]),
       client.query(
         `SELECT id, title, overview, genres, release_year,
                 vote_average, vote_count, popularity
@@ -288,7 +319,14 @@ app.post("/api/chat", async (req, res) => {
       ),
     ]);
 
-    const movies     = vectorResult.rows;
+    // Si el filtro de género no devuelve resultados, fallback sin filtro
+    let movies = vectorResult.rows;
+    if (movies.length === 0 && hasGenreFilter) {
+      console.log(`[/api/chat] sin resultados con filtro, usando búsqueda sin filtro`);
+      const fallback = await client.query(vectorSql, [`[${queryVector.join(",")}]`, ""]);
+      movies = fallback.rows;
+    }
+
     const textMovies = textResult.rows;
 
     if (movies.length === 0) {
@@ -300,7 +338,7 @@ app.post("/api/chat", async (req, res) => {
       });
     }
 
-    // 3. Contexto para el LLM
+    // 4b. Contexto para el LLM
     const context = movies
       .map((m, i) => {
         const genres   = Array.isArray(m.genres)   ? m.genres.join(", ")   : "N/D";
@@ -315,9 +353,10 @@ app.post("/api/chat", async (req, res) => {
       })
       .join("\n\n");
 
-    // 4. Detectar género y preamble (usa la query corregida)
-    const detectedGenre = detectGenre(correctedQuery, movies);
-    const preamble      = GENRE_PREAMBLES[detectedGenre] || GENRE_PREAMBLES.general;
+    // 5. Detectar género final para el preamble (con fallback a películas si hace falta)
+    const detectedGenre = genreForFilter !== "general" ? genreForFilter : detectGenre(correctedQuery, movies);
+    const basePreamble  = GENRE_PREAMBLES[detectedGenre] || GENRE_PREAMBLES.general;
+    const preamble      = basePreamble + " REGLA ABSOLUTA: solo recomendá películas de la lista que te pasan. Si los resultados no son relevantes para lo que busca el usuario, decilo honestamente. Nunca afirmes que un actor aparece en una película si su nombre no está en la sinopsis o keywords.";
     console.log(`[/api/chat] género detectado: ${detectedGenre}`);
 
     // 5. Historial para Cohere (últimas 6 entradas = 3 turnos)
@@ -332,7 +371,7 @@ app.post("/api/chat", async (req, res) => {
       model:       "command-r-plus-08-2024",
       preamble,
       chatHistory: cohereHistory,
-      message:     `El usuario busca: "${query.trim()}"\n\nPelículas relevantes:\n\n${context}`,
+      message:     `El usuario busca: "${query.trim()}"\n\nPelículas encontradas por búsqueda vectorial (similitud semántica):\n\n${context}\n\nADVERTENCIA CRÍTICA: estas películas fueron encontradas por proximidad vectorial, NO porque necesariamente incluyan a "${query.trim()}". Antes de mencionar que alguien aparece en una película, verificá que su nombre figure explícitamente en la sinopsis o keywords de esa película. Si no figura, NO lo afirmes. Si ninguna película menciona a la persona buscada, decí honestamente: "No encontré películas con [nombre] en la base de datos."`,
     });
 
     // 7. Historial actualizado para el frontend
