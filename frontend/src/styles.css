@@ -204,6 +204,8 @@ body {
   align-self: flex-start;
 }
 .correctionNote strong { color: var(--primary); }
+.correctionFrom { color: var(--text-muted); text-decoration: line-through; }
+.correctionTo { color: var(--primary); }
 
 .simInfo { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; }
 .simBadge { font-size: 0.75rem; font-weight: 700; color: var(--sim); background: #ecfdf5; border-radius: var(--r-chip); padding: 3px 10px; }

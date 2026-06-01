@@ -130,16 +130,22 @@ function levenshtein(a, b) {
  */
 function correctTypos(query) {
   const words = query.toLowerCase().split(/\s+/);
-  let wasCorrected = false;
+  const corrections = [];
   const fixed = words.map((word) => {
     if (word.length < 4) return word;
-    const maxDist = word.length >= 7 ? 2 : 1;
+    // Tolerancia escalonada: palabras más largas admiten más errores
+    const maxDist = word.length >= 8 ? 3 : word.length >= 6 ? 2 : 1;
     for (const keywords of Object.values(GENRE_KEYWORDS)) {
       for (const kw of keywords) {
         for (const kwWord of kw.split(/\s+/)) {
-          if (kwWord.length >= 4 && word !== kwWord && levenshtein(word, kwWord) <= maxDist) {
+          if (
+            kwWord.length >= 4 &&
+            word !== kwWord &&
+            word[0] === kwWord[0] &&          // primera letra igual: evita falsos positivos
+            levenshtein(word, kwWord) <= maxDist
+          ) {
             console.log(`[correctTypos] "${word}" → "${kwWord}"`);
-            wasCorrected = true;
+            corrections.push({ from: word, to: kwWord });
             return kwWord;
           }
         }
@@ -147,7 +153,7 @@ function correctTypos(query) {
     }
     return word;
   });
-  return { corrected: fixed.join(" "), wasCorrected };
+  return { corrected: fixed.join(" "), wasCorrected: corrections.length > 0, corrections };
 }
 
 /**
@@ -164,13 +170,15 @@ function detectGenre(query, movies = []) {
     if (keywords.some((kw) => q.includes(kw))) return genre;
   }
 
-  // 2. Fuzzy matching: cada palabra del query vs cada keyword (tolerancia por longitud)
+  // 2. Fuzzy matching con guard de primera letra (misma tolerancia escalonada)
   for (const word of words) {
-    const maxDist = word.length >= 7 ? 2 : 1;
+    const maxDist = word.length >= 8 ? 3 : word.length >= 6 ? 2 : 1;
     for (const [genre, keywords] of Object.entries(GENRE_KEYWORDS)) {
       const match = keywords.some((kw) =>
         kw.split(/\s+/).some((kwWord) =>
-          kwWord.length >= 4 && levenshtein(word, kwWord) <= maxDist
+          kwWord.length >= 4 &&
+          word[0] === kwWord[0] &&
+          levenshtein(word, kwWord) <= maxDist
         )
       );
       if (match) {
@@ -246,7 +254,7 @@ app.post("/api/chat", async (req, res) => {
   let client;
   try {
     // 1. Corregir typos antes de embedear
-    const { corrected: correctedQuery, wasCorrected } = correctTypos(query.trim());
+    const { corrected: correctedQuery, wasCorrected, corrections } = correctTypos(query.trim());
     if (wasCorrected) console.log(`[/api/chat] query corregida: "${query.trim()}" → "${correctedQuery}"`);
 
     // 2. Embedding de la query (con la corrección aplicada)
@@ -351,6 +359,7 @@ app.post("/api/chat", async (req, res) => {
       response:       chatResponse.text,
       genre:          detectedGenre,
       correctedQuery: wasCorrected ? correctedQuery : null,
+      corrections:    wasCorrected ? corrections : [],
       movies:         movies.map(fmt),
       textMovies:     textMovies.map((m) => ({ ...fmt(m), similarity: undefined })),
       chatHistory:    updatedHistory,

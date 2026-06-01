@@ -405,7 +405,9 @@ function ChatTab() {
       setMessages((prev) => [...prev, {
         type: "bot", text: data.response,
         movies: data.movies || [], textMovies: data.textMovies || [],
-        genre: data.genre, correctedQuery: data.correctedQuery || null,
+        genre: data.genre,
+        correctedQuery: data.correctedQuery || null,
+        corrections: data.corrections || [],
       }]);
     } catch (err) {
       setError(err.message);
@@ -450,7 +452,15 @@ function ChatTab() {
               <div key={i} className="botTurn">
                 {msg.correctedQuery && (
                   <div className="correctionNote">
-                    Busqué por: <strong>{msg.correctedQuery}</strong>
+                    Corregí:{" "}
+                    {msg.corrections.map((c, i) => (
+                      <span key={i}>
+                        <span className="correctionFrom">{c.from}</span>
+                        {" → "}
+                        <strong className="correctionTo">{c.to}</strong>
+                        {i < msg.corrections.length - 1 ? ", " : ""}
+                      </span>
+                    ))}
                   </div>
                 )}
                 <div className="llmResponse">
