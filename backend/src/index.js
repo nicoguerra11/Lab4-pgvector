@@ -110,19 +110,77 @@ const GENRE_DB_MAP = {
   "war": "war", "western": "western",
 };
 
+function levenshtein(a, b) {
+  const m = a.length, n = b.length;
+  const dp = Array.from({ length: m + 1 }, (_, i) => [i]);
+  for (let j = 1; j <= n; j++) dp[0][j] = j;
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      dp[i][j] = a[i-1] === b[j-1]
+        ? dp[i-1][j-1]
+        : 1 + Math.min(dp[i-1][j], dp[i][j-1], dp[i-1][j-1]);
+    }
+  }
+  return dp[m][n];
+}
+
 /**
- * Detecta el género principal a partir del texto de la query
- * y, como fallback, del género más frecuente en las películas recuperadas.
+ * Corrige typos en la query reemplazando palabras cercanas a keywords de género.
+ * Devuelve la query corregida y si hubo cambios.
+ */
+function correctTypos(query) {
+  const words = query.toLowerCase().split(/\s+/);
+  let wasCorrected = false;
+  const fixed = words.map((word) => {
+    if (word.length < 4) return word;
+    const maxDist = word.length >= 7 ? 2 : 1;
+    for (const keywords of Object.values(GENRE_KEYWORDS)) {
+      for (const kw of keywords) {
+        for (const kwWord of kw.split(/\s+/)) {
+          if (kwWord.length >= 4 && word !== kwWord && levenshtein(word, kwWord) <= maxDist) {
+            console.log(`[correctTypos] "${word}" → "${kwWord}"`);
+            wasCorrected = true;
+            return kwWord;
+          }
+        }
+      }
+    }
+    return word;
+  });
+  return { corrected: fixed.join(" "), wasCorrected };
+}
+
+/**
+ * Detecta el género principal a partir del texto de la query.
+ * Usa matching exacto primero, luego fuzzy (Levenshtein) para tolerar typos,
+ * y como último recurso el género más frecuente en las películas recuperadas.
  */
 function detectGenre(query, movies = []) {
-  const q = query.toLowerCase();
+  const q     = query.toLowerCase();
+  const words = q.split(/\s+/).filter((w) => w.length >= 4);
 
-  // 1. Buscar coincidencia en el texto de la query
+  // 1. Matching exacto
   for (const [genre, keywords] of Object.entries(GENRE_KEYWORDS)) {
     if (keywords.some((kw) => q.includes(kw))) return genre;
   }
 
-  // 2. Fallback: género más frecuente entre las películas recuperadas
+  // 2. Fuzzy matching: cada palabra del query vs cada keyword (tolerancia por longitud)
+  for (const word of words) {
+    const maxDist = word.length >= 7 ? 2 : 1;
+    for (const [genre, keywords] of Object.entries(GENRE_KEYWORDS)) {
+      const match = keywords.some((kw) =>
+        kw.split(/\s+/).some((kwWord) =>
+          kwWord.length >= 4 && levenshtein(word, kwWord) <= maxDist
+        )
+      );
+      if (match) {
+        console.log(`[detectGenre] fuzzy match: "${word}" → ${genre}`);
+        return genre;
+      }
+    }
+  }
+
+  // 3. Fallback: género más frecuente entre las películas recuperadas
   const counts = {};
   for (const movie of movies) {
     for (const g of Array.isArray(movie.genres) ? movie.genres : []) {
@@ -133,7 +191,7 @@ function detectGenre(query, movies = []) {
   const topGenre = Object.entries(counts).sort((a, b) => b[1] - a[1])[0]?.[0];
   const mapped   = GENRE_DB_MAP[topGenre] || "general";
 
-  // Evitar recomendar en tono "documental" si el usuario no lo pidió explícitamente
+  // Evitar tono "documental" si el usuario no lo pidió explícitamente
   if (mapped === "documentary" && !GENRE_KEYWORDS.documentary.some((kw) => q.includes(kw))) {
     return "general";
   }
@@ -187,9 +245,13 @@ app.post("/api/chat", async (req, res) => {
 
   let client;
   try {
-    // 1. Embedding de la query
+    // 1. Corregir typos antes de embedear
+    const { corrected: correctedQuery, wasCorrected } = correctTypos(query.trim());
+    if (wasCorrected) console.log(`[/api/chat] query corregida: "${query.trim()}" → "${correctedQuery}"`);
+
+    // 2. Embedding de la query (con la corrección aplicada)
     const embResult = await cohere.embed({
-      texts:     [query.trim()],
+      texts:     [correctedQuery],
       model:     "embed-multilingual-v3.0",
       inputType: "search_query",
     });
@@ -197,7 +259,7 @@ app.post("/api/chat", async (req, res) => {
 
     client = await pool.connect();
 
-    // 2. Vector search + text search en paralelo
+    // 3. Vector search + text search en paralelo
     const safe = query.trim().replace(/[%_\\]/g, "\\$&");
     const [vectorResult, textResult] = await Promise.all([
       client.query(
@@ -245,8 +307,8 @@ app.post("/api/chat", async (req, res) => {
       })
       .join("\n\n");
 
-    // 4. Detectar género y preamble
-    const detectedGenre = detectGenre(query.trim(), movies);
+    // 4. Detectar género y preamble (usa la query corregida)
+    const detectedGenre = detectGenre(correctedQuery, movies);
     const preamble      = GENRE_PREAMBLES[detectedGenre] || GENRE_PREAMBLES.general;
     console.log(`[/api/chat] género detectado: ${detectedGenre}`);
 
@@ -286,11 +348,12 @@ app.post("/api/chat", async (req, res) => {
     });
 
     res.json({
-      response:    chatResponse.text,
-      genre:       detectedGenre,
-      movies:      movies.map(fmt),
-      textMovies:  textMovies.map((m) => ({ ...fmt(m), similarity: undefined })),
-      chatHistory: updatedHistory,
+      response:       chatResponse.text,
+      genre:          detectedGenre,
+      correctedQuery: wasCorrected ? correctedQuery : null,
+      movies:         movies.map(fmt),
+      textMovies:     textMovies.map((m) => ({ ...fmt(m), similarity: undefined })),
+      chatHistory:    updatedHistory,
     });
   } catch (err) {
     console.error("[/api/chat] Error:", err.message);
@@ -420,7 +483,7 @@ app.get("/api/stats", async (_req, res) => {
       client.query(`
         SELECT g AS genre, COUNT(*) AS count
         FROM   movies, unnest(genres) AS g
-        GROUP  BY g ORDER BY count DESC LIMIT 15`),
+        GROUP  BY g ORDER BY count DESC`),
       client.query(`
         SELECT (release_year / 10 * 10) AS decade, COUNT(*) AS count
         FROM   movies

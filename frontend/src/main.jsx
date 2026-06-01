@@ -110,7 +110,10 @@ function MovieCard({ movie, showSimilarity = false, showPopularity = false }) {
       <div className="movieMeta">
         <span className="rating"><Icon name="star" size={14} />{rating}</span>
         {showSimilarity && movie.similarity != null && (
-          <span className="simBadge">{Math.max(0, Math.round(movie.similarity * 100))}% match</span>
+          <div className="simInfo">
+            <span className="simBadge">{Math.max(0, Math.round(movie.similarity * 100))}% match</span>
+            <span className="distBadge">dist: {Math.max(0, 1 - movie.similarity).toFixed(3)}</span>
+          </div>
         )}
         {showPopularity && movie.popularity != null && (
           <span className="popBadge">
@@ -158,6 +161,54 @@ function MovieCard({ movie, showSimilarity = false, showPopularity = false }) {
               </div>
             ))}
           </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── CustomSelect ─────────────────────────────────────────────────────────────────
+function CustomSelect({ value, onChange, options, placeholder = "Todos" }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+
+  useEffect(() => {
+    function handleClick(e) {
+      if (ref.current && !ref.current.contains(e.target)) setOpen(false);
+    }
+    document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, []);
+
+  return (
+    <div className="customSelect" ref={ref}>
+      <button
+        type="button"
+        className={`customSelectTrigger${open ? " customSelectOpen" : ""}`}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span>{value || placeholder}</span>
+        <svg className={`customSelectChevron${open ? " chevronUp" : ""}`} width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M7 10l5 5 5-5z"/>
+        </svg>
+      </button>
+      {open && (
+        <div className="customSelectMenu">
+          <div
+            className={`customSelectItem${!value ? " customSelectItemActive" : ""}`}
+            onClick={() => { onChange(""); setOpen(false); }}
+          >
+            {placeholder}
+          </div>
+          {options.map((opt) => (
+            <div
+              key={opt}
+              className={`customSelectItem${value === opt ? " customSelectItemActive" : ""}`}
+              onClick={() => { onChange(opt); setOpen(false); }}
+            >
+              {opt}
+            </div>
+          ))}
         </div>
       )}
     </div>
@@ -353,7 +404,8 @@ function ChatTab() {
       setCohereHist(data.chatHistory || []);
       setMessages((prev) => [...prev, {
         type: "bot", text: data.response,
-        movies: data.movies || [], textMovies: data.textMovies || [], genre: data.genre,
+        movies: data.movies || [], textMovies: data.textMovies || [],
+        genre: data.genre, correctedQuery: data.correctedQuery || null,
       }]);
     } catch (err) {
       setError(err.message);
@@ -396,6 +448,11 @@ function ChatTab() {
               </div>
             ) : (
               <div key={i} className="botTurn">
+                {msg.correctedQuery && (
+                  <div className="correctionNote">
+                    Busqué por: <strong>{msg.correctedQuery}</strong>
+                  </div>
+                )}
                 <div className="llmResponse">
                   <div className="llmAvatar"><Icon name="sparkle" size={22} /></div>
                   <div className="llmBubble">
@@ -521,11 +578,11 @@ function MoviesTab() {
         <div className="filterPanel">
           <div className="filterRow">
             <label className="filterLabel">Género</label>
-            <select className="filterSelect" value={genre}
-              onChange={(e) => { setGenre(e.target.value); setPage(1); }}>
-              <option value="">Todos</option>
-              {TMDB_GENRES.map((g) => <option key={g} value={g}>{g}</option>)}
-            </select>
+            <CustomSelect
+              value={genre}
+              onChange={(v) => { setGenre(v); setPage(1); }}
+              options={TMDB_GENRES}
+            />
           </div>
           <div className="filterRow">
             <label className="filterLabel">Año</label>
