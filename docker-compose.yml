@@ -7,7 +7,7 @@ services:
       POSTGRES_PASSWORD: app_password
       POSTGRES_DB:       app_db
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - pgvector_data:/var/lib/postgresql/data
       - ./database/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
@@ -46,7 +46,7 @@ services:
     environment:
       VITE_API_URL: http://localhost:3001/api
     ports:
-      - "5174:5173"
+      - "5174:5174"
     depends_on:
       - backend
 
