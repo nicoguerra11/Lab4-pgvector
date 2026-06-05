@@ -723,6 +723,74 @@ body {
 .customSelectItem:hover { background: var(--primary-light); color: var(--primary); }
 .customSelectItemActive { background: var(--primary-light); color: var(--primary); font-weight: 700; }
 
+/* ─── Favoritos ──────────────────────────────────────────────────────────────── */
+.favBtn {
+  background: none; border: none; cursor: pointer; padding: 4px;
+  color: var(--text-muted); border-radius: 50%; transition: color 0.15s, transform 0.15s;
+  margin-left: auto; flex-shrink: 0;
+}
+.favBtn:hover   { color: #e53e3e; transform: scale(1.15); }
+.favBtnActive   { color: #e53e3e; }
+.movieCardFav   { border-color: #e53e3e44; }
+
+.favTabBadge {
+  background: #e53e3e; color: #fff; font-size: 0.68rem; font-weight: 700;
+  border-radius: 10px; padding: 1px 6px; margin-left: 4px; line-height: 1.4;
+}
+
+.favTab      { display: flex; flex-direction: column; gap: 28px; }
+.favTabTop   { display: flex; flex-direction: column; gap: 16px; }
+.favTabTitle { font-size: 1.5rem; font-weight: 700; color: var(--text); }
+
+.favCentroidCard {
+  display: flex; align-items: center; justify-content: space-between; gap: 20px;
+  border: 1.5px solid var(--border); border-radius: var(--r-card);
+  padding: 20px 24px; background: var(--surface);
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+.favCentroidCardReady {
+  border-color: var(--primary);
+  box-shadow: var(--glow-primary);
+}
+.favCentroidInfo    { display: flex; flex-direction: column; gap: 4px; }
+.favCentroidLabel   { font-size: 0.95rem; font-weight: 600; color: var(--text); }
+.favCentroidDesc    { font-size: 0.83rem; color: var(--text-muted); max-width: 480px; line-height: 1.5; }
+
+.favRecommendBtn {
+  display: flex; align-items: center; gap: 8px; flex-shrink: 0;
+  background: var(--primary); color: #fff; border: none; cursor: pointer;
+  border-radius: 20px; padding: 12px 24px; font-size: 0.9rem; font-weight: 600;
+}
+.favRecommendBtn:hover:not(:disabled) { background: var(--primary-hover); }
+.favRecommendBtn:disabled             { opacity: 0.4; cursor: not-allowed; }
+
+.favSelectedGrid {
+  display: flex; flex-wrap: wrap; gap: 8px;
+}
+.favChip {
+  display: flex; align-items: center; gap: 6px;
+  background: var(--primary-light); border: 1px solid var(--border);
+  border-radius: 20px; padding: 5px 10px 5px 14px;
+}
+.favChipTitle  { font-size: 0.83rem; font-weight: 500; color: var(--text); }
+.favChipYear   { font-size: 0.75rem; color: var(--text-muted); }
+.favChipRemove {
+  background: none; border: none; cursor: pointer; color: var(--text-muted);
+  display: flex; padding: 2px; border-radius: 50%;
+}
+.favChipRemove:hover { color: #e53e3e; }
+
+.favResultsTitle {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 1rem; font-weight: 600; color: var(--text);
+}
+
+.cachedBadge {
+  display: inline-block; font-size: 0.72rem; font-weight: 600;
+  color: var(--primary); background: var(--primary-light);
+  border-radius: 10px; padding: 2px 8px; margin-bottom: 8px;
+}
+
 /* ─── Responsive ─────────────────────────────────────────────────────────────── */
 @media (max-width: 640px) {
   .appHeader       { padding: 0 16px; }

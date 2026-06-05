@@ -167,18 +167,16 @@ async function main() {
     const total = parseInt(countResult.rows[0].n, 10);
 
     if (total > 0) {
-      // Heurística: lists ≈ √n, mínimo 10, máximo 100
-      const lists = Math.max(10, Math.min(Math.ceil(Math.sqrt(total)), 100));
-      console.log(`🔧 Creando índice ivfflat sobre ${total} vectores (lists=${lists})...`);
+      console.log(`🔧 Creando índice HNSW sobre ${total} vectores (m=16, ef_construction=64)...`);
 
       await db.query("DROP INDEX IF EXISTS movies_embedding_idx");
       await db.query(`
         CREATE INDEX movies_embedding_idx
-          ON movies USING ivfflat (embedding vector_cosine_ops)
-          WITH (lists = ${lists})
+          ON movies USING hnsw (embedding vector_cosine_ops)
+          WITH (m = 16, ef_construction = 64)
       `);
 
-      console.log("✅ Índice ivfflat creado exitosamente");
+      console.log("✅ Índice HNSW creado exitosamente");
     }
   } finally {
     db.release();

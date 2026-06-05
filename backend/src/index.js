@@ -287,8 +287,40 @@ app.post("/api/chat", async (req, res) => {
       inputType: "search_query",
     });
     const queryVector = embResult.embeddings[0];
+    const vecStr      = `[${queryVector.join(",")}]`;
 
     client = await pool.connect();
+
+    // 2b. Semantic cache: si hay una query semánticamente similar (>= 95%), devolver cacheado
+    const CACHE_THRESHOLD = 0.95;
+    const cacheHit = await client.query(
+      `SELECT response, 1 - (query_embedding <=> $1::vector) AS similarity
+       FROM   query_cache
+       WHERE  1 - (query_embedding <=> $1::vector) >= $2
+       ORDER  BY query_embedding <=> $1::vector
+       LIMIT  1`,
+      [vecStr, CACHE_THRESHOLD]
+    );
+
+    if (cacheHit.rows.length > 0) {
+      const cached = cacheHit.rows[0].response;
+      console.log(`[/api/chat] cache hit (sim=${parseFloat(cacheHit.rows[0].similarity).toFixed(4)})`);
+      const trimmedH = chatHistory.slice(-6);
+      return res.json({
+        response:       cached.llmResponse,
+        genre:          cached.genre,
+        correctedQuery: cached.correctedQuery,
+        corrections:    cached.corrections,
+        movies:         cached.movies,
+        textMovies:     cached.textMovies,
+        cached:         true,
+        chatHistory: [
+          ...trimmedH,
+          { role: "user",      message: query.trim() },
+          { role: "assistant", message: cached.llmResponse },
+        ],
+      });
+    }
 
     // 3. Detectar género desde el texto (sin fallback de películas) para el filtro
     const genreForFilter  = detectGenre(correctedQuery, []);
@@ -296,7 +328,8 @@ app.post("/api/chat", async (req, res) => {
     const hasGenreFilter  = dbGenreFilter !== "";
     console.log(`[/api/chat] filtro de género: "${dbGenreFilter || "ninguno"}"`);
 
-    // 4. Vector search híbrido + text search en paralelo
+    // 4. Búsqueda híbrida con RRF (Reciprocal Rank Fusion)
+    //    Obtenemos top-20 de cada fuente y fusionamos rankings con k=60
     const safe = query.trim().replace(/[%_\\]/g, "\\$&");
     const vectorSql = `
       SELECT id, title, overview, genres, keywords,
@@ -305,29 +338,48 @@ app.post("/api/chat", async (req, res) => {
       FROM   movies
       WHERE  embedding IS NOT NULL
         AND  ($2 = '' OR $2 ILIKE ANY(genres))
-      ORDER  BY embedding <=> $1::vector LIMIT 5`;
+      ORDER  BY embedding <=> $1::vector LIMIT 20`;
 
     const [vectorResult, textResult] = await Promise.all([
-      client.query(vectorSql, [`[${queryVector.join(",")}]`, dbGenreFilter]),
+      client.query(vectorSql, [vecStr, dbGenreFilter]),
       client.query(
         `SELECT id, title, overview, genres, release_year,
                 vote_average, vote_count, popularity
          FROM   movies
          WHERE  title ILIKE $1 OR overview ILIKE $1
-         ORDER  BY popularity DESC NULLS LAST LIMIT 5`,
+         ORDER  BY popularity DESC NULLS LAST LIMIT 20`,
         [`%${safe}%`]
       ),
     ]);
 
-    // Si el filtro de género no devuelve resultados, fallback sin filtro
-    let movies = vectorResult.rows;
-    if (movies.length === 0 && hasGenreFilter) {
+    // Fallback sin filtro de género si no hay resultados vectoriales
+    let vectorRows = vectorResult.rows;
+    if (vectorRows.length === 0 && hasGenreFilter) {
       console.log(`[/api/chat] sin resultados con filtro, usando búsqueda sin filtro`);
-      const fallback = await client.query(vectorSql, [`[${queryVector.join(",")}]`, ""]);
-      movies = fallback.rows;
+      const fallback = await client.query(vectorSql, [vecStr, ""]);
+      vectorRows = fallback.rows;
     }
 
-    const textMovies = textResult.rows;
+    // RRF: fusionar rankings de búsqueda vectorial y textual
+    const RRF_K = 60;
+    const rrfMap = new Map();
+    vectorRows.forEach((m, idx) => {
+      rrfMap.set(m.id, { ...m, rrf_score: 1 / (RRF_K + idx + 1) });
+    });
+    textResult.rows.forEach((m, idx) => {
+      const score = 1 / (RRF_K + idx + 1);
+      if (rrfMap.has(m.id)) {
+        rrfMap.get(m.id).rrf_score += score;
+      } else {
+        rrfMap.set(m.id, { ...m, rrf_score: score, similarity: null });
+      }
+    });
+
+    let movies = [...rrfMap.values()]
+      .sort((a, b) => b.rrf_score - a.rrf_score)
+      .slice(0, 5);
+
+    const textMovies = textResult.rows.slice(0, 5);
 
     if (movies.length === 0) {
       return res.json({
@@ -394,13 +446,34 @@ app.post("/api/chat", async (req, res) => {
       similarity:   parseFloat(parseFloat(m.similarity ?? 0).toFixed(4)),
     });
 
+    const fmtMovies    = movies.map(fmt);
+    const fmtTextMovies = textMovies.map((m) => ({ ...fmt(m), similarity: undefined }));
+
+    // 8. Guardar en semantic cache para futuras queries similares
+    try {
+      await client.query(
+        `INSERT INTO query_cache (query_text, query_embedding, response) VALUES ($1, $2, $3)`,
+        [correctedQuery, vecStr, JSON.stringify({
+          llmResponse:    chatResponse.text,
+          genre:          detectedGenre,
+          correctedQuery: wasCorrected ? correctedQuery : null,
+          corrections:    wasCorrected ? corrections : [],
+          movies:         fmtMovies,
+          textMovies:     fmtTextMovies,
+        })]
+      );
+    } catch (cacheErr) {
+      console.warn("[/api/chat] no se pudo guardar en cache:", cacheErr.message);
+    }
+
     res.json({
       response:       chatResponse.text,
       genre:          detectedGenre,
       correctedQuery: wasCorrected ? correctedQuery : null,
       corrections:    wasCorrected ? corrections : [],
-      movies:         movies.map(fmt),
-      textMovies:     textMovies.map((m) => ({ ...fmt(m), similarity: undefined })),
+      movies:         fmtMovies,
+      textMovies:     fmtTextMovies,
+      cached:         false,
       chatHistory:    updatedHistory,
     });
   } catch (err) {
@@ -556,6 +629,62 @@ app.get("/api/stats", async (_req, res) => {
       topByRating:       topRated.rows.map((r) => ({ id: r.id, title: r.title, vote_average: parseFloat(r.vote_average), vote_count: r.vote_count })),
     });
   } catch (err) {
+    res.status(500).json({ error: err.message });
+  } finally {
+    if (client) client.release();
+  }
+});
+
+// ─── POST /api/recommend/favorites ──────────────────────────────────────────────
+// Calcula el centroide (AVG de embeddings) de las películas favoritas del usuario
+// y devuelve las N más cercanas a ese vector promedio.
+app.post("/api/recommend/favorites", async (req, res) => {
+  const { movieIds } = req.body;
+  if (!Array.isArray(movieIds) || movieIds.length < 2) {
+    return res.status(400).json({ error: "Se necesitan al menos 2 películas favoritas." });
+  }
+
+  const ids = movieIds.map(Number).filter((n) => Number.isFinite(n) && n > 0);
+  if (ids.length < 2) {
+    return res.status(400).json({ error: "IDs inválidos." });
+  }
+
+  let client;
+  try {
+    client = await pool.connect();
+
+    // Centroide: AVG de los embeddings de las películas seleccionadas
+    const centroidSql = `
+      SELECT id, title, overview, genres, keywords,
+             release_year, vote_average, vote_count, popularity,
+             1 - (embedding <=> (
+               SELECT AVG(embedding) FROM movies WHERE id = ANY($1::int[])
+             )) AS similarity
+      FROM   movies
+      WHERE  id != ALL($1::int[]) AND embedding IS NOT NULL
+      ORDER  BY embedding <=> (
+        SELECT AVG(embedding) FROM movies WHERE id = ANY($1::int[])
+      )
+      LIMIT 10`;
+
+    const { rows } = await client.query(centroidSql, [ids]);
+
+    res.json({
+      movies: rows.map((m) => ({
+        id:           m.id,
+        title:        m.title,
+        overview:     m.overview,
+        genres:       m.genres,
+        keywords:     m.keywords || [],
+        release_year: m.release_year,
+        vote_average: parseFloat(m.vote_average),
+        vote_count:   m.vote_count,
+        popularity:   parseFloat(m.popularity),
+        similarity:   parseFloat(parseFloat(m.similarity).toFixed(4)),
+      })),
+    });
+  } catch (err) {
+    console.error("[/api/recommend/favorites] Error:", err.message);
     res.status(500).json({ error: err.message });
   } finally {
     if (client) client.release();

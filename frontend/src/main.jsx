@@ -26,6 +26,7 @@ const ICONS = {
   close:   "M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z",
   filter:  "M10 18h4v-2h-4v2zM3 6v2h18V6H3zm3 7h12v-2H6v2z",
   similar: "M4 8h4V4H4v4zm6 12h4v-4h-4v4zm-6 0h4v-4H4v4zm0-6h4v-4H4v4zm6 0h4v-4h-4v4zm6-10v4h4V4h-4zm-6 4h4V4h-4v4zm6 6h4v-4h-4v4zm0 6h4v-4h-4v4z",
+  heart:   "M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z",
 };
 
 function Icon({ name, size = 20, className = "" }) {
@@ -66,7 +67,7 @@ function useSearchHistory() {
 }
 
 // ─── MovieCard ────────────────────────────────────────────────────────────────────
-function MovieCard({ movie, showSimilarity = false, showPopularity = false }) {
+function MovieCard({ movie, showSimilarity = false, showPopularity = false, isFavorite = false, onToggleFavorite = null }) {
   const [expanded,    setExpanded]    = useState(false);
   const [showSim,     setShowSim]     = useState(false);
   const [simMovies,   setSimMovies]   = useState([]);
@@ -95,10 +96,19 @@ function MovieCard({ movie, showSimilarity = false, showPopularity = false }) {
   }
 
   return (
-    <div className={`movieCard${expanded ? " movieCardExpanded" : ""}`}>
+    <div className={`movieCard${expanded ? " movieCardExpanded" : ""}${isFavorite ? " movieCardFav" : ""}`}>
       <div className="movieCardTop">
         <h3 className="movieTitle">{movie.title}</h3>
         {movie.release_year && <span className="yearBadge">{movie.release_year}</span>}
+        {onToggleFavorite && (
+          <button
+            className={`favBtn${isFavorite ? " favBtnActive" : ""}`}
+            onClick={() => onToggleFavorite(movie)}
+            title={isFavorite ? "Quitar de favoritos" : "Agregar a favoritos"}
+          >
+            <Icon name="heart" size={15} />
+          </button>
+        )}
       </div>
 
       {genres.length > 0 && (
@@ -371,7 +381,7 @@ function ComparisonSection({ vectorMovies, textMovies }) {
 }
 
 // ─── ChatTab ──────────────────────────────────────────────────────────────────────
-function ChatTab() {
+function ChatTab({ favorites = new Set(), onToggleFavorite = null }) {
   const [query,       setQuery]       = useState("");
   const [loading,     setLoading]     = useState(false);
   const [messages,    setMessages]    = useState([]);
@@ -408,6 +418,7 @@ function ChatTab() {
         genre: data.genre,
         correctedQuery: data.correctedQuery || null,
         corrections: data.corrections || [],
+        cached: data.cached || false,
       }]);
     } catch (err) {
       setError(err.message);
@@ -466,6 +477,7 @@ function ChatTab() {
                 <div className="llmResponse">
                   <div className="llmAvatar"><Icon name="sparkle" size={22} /></div>
                   <div className="llmBubble">
+                    {msg.cached && <span className="cachedBadge">respuesta cacheada</span>}
                     {msg.text.split("\n").filter(Boolean).map((line, j) => <p key={j}>{line}</p>)}
                   </div>
                 </div>
@@ -473,7 +485,12 @@ function ChatTab() {
                   <section className="recommendedSection">
                     <h3 className="sectionTitle"><Icon name="sparkle" size={13} /> Resultados vectoriales</h3>
                     <div className="movieGrid">
-                      {msg.movies.map((m) => <MovieCard key={m.id} movie={m} showSimilarity />)}
+                      {msg.movies.map((m) => (
+                        <MovieCard key={m.id} movie={m} showSimilarity
+                          isFavorite={favorites.has(m.id)}
+                          onToggleFavorite={onToggleFavorite}
+                        />
+                      ))}
                     </div>
                   </section>
                 )}
@@ -520,7 +537,7 @@ function ChatTab() {
 }
 
 // ─── MoviesTab ────────────────────────────────────────────────────────────────────
-function MoviesTab() {
+function MoviesTab({ favorites = new Set(), onToggleFavorite = null }) {
   const LIMIT = 20;
   const [search,    setSearch]    = useState("");
   const [debSearch, setDebSearch] = useState("");
@@ -624,7 +641,12 @@ function MoviesTab() {
       {!loading && !error && movies.length > 0 && (
         <>
           <div className="movieGrid">
-            {movies.map((m) => <MovieCard key={m.id} movie={m} showPopularity />)}
+            {movies.map((m) => (
+              <MovieCard key={m.id} movie={m} showPopularity
+                isFavorite={favorites.has(m.id)}
+                onToggleFavorite={onToggleFavorite}
+              />
+            ))}
           </div>
           <div className="paginationBar">
             <button className="paginationBtn" onClick={() => setPage((p) => p - 1)} disabled={page === 1}>← Anterior</button>
@@ -644,17 +666,114 @@ function MoviesTab() {
   );
 }
 
+// ─── FavoritesTab ────────────────────────────────────────────────────────────────
+function FavoritesTab({ favorites, onToggleFavorite }) {
+  const [results,  setResults]  = useState([]);
+  const [loading,  setLoading]  = useState(false);
+  const [error,    setError]    = useState(null);
+  const [searched, setSearched] = useState(false);
+
+  const favMovies = [...favorites.values()];
+
+  useEffect(() => { setResults([]); setSearched(false); setError(null); }, [favorites.size]);
+
+  async function recommend() {
+    if (favorites.size < 2) return;
+    setLoading(true); setError(null); setSearched(true);
+    try {
+      const res  = await fetch(`${API_URL}/recommend/favorites`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ movieIds: [...favorites.keys()] }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Error");
+      setResults(data.movies || []);
+    } catch (err) { setError(err.message); }
+    finally { setLoading(false); }
+  }
+
+  if (favorites.size === 0) {
+    return (
+      <div className="placeholderTab">
+        <Icon name="heart" size={48} className="placeholderSvg" />
+        <p>Marcá películas con el corazón desde Chat o Películas para agregarlas aquí.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="favTab">
+      <div className="favTabTop">
+        <h2 className="favTabTitle">Tus favoritas</h2>
+        <div className="favSelectedGrid">
+          {favMovies.map((m) => (
+            <div key={m.id} className="favChip">
+              <span className="favChipTitle">{m.title}</span>
+              {m.release_year && <span className="favChipYear">{m.release_year}</span>}
+              <button className="favChipRemove" onClick={() => onToggleFavorite(m)}>
+                <Icon name="close" size={12} />
+              </button>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className={`favCentroidCard${favorites.size >= 2 ? " favCentroidCardReady" : ""}`}>
+        <div className="favCentroidInfo">
+          <p className="favCentroidLabel">Recomendación por centroide vectorial</p>
+          <p className="favCentroidDesc">
+            {favorites.size < 2
+              ? `Marcá ${2 - favorites.size} película${2 - favorites.size > 1 ? "s" : ""} más para activar esta función.`
+              : `CineVec promedia los embeddings de tus ${favorites.size} favoritas y busca las películas más cercanas en el espacio vectorial.`}
+          </p>
+        </div>
+        <button className="favRecommendBtn" onClick={recommend} disabled={loading || favorites.size < 2}>
+          {loading ? <span className="btnSpinnerSm" /> : <Icon name="sparkle" size={16} />}
+          {loading ? "Calculando…" : "Recomendar"}
+        </button>
+      </div>
+
+      {error && <div className="errorBox"><strong>Error</strong><span>{error}</span></div>}
+
+      {searched && !loading && results.length > 0 && (
+        <>
+          <h3 className="favResultsTitle">
+            <Icon name="sparkle" size={14} /> Películas más cercanas al centroide
+          </h3>
+          <div className="movieGrid">
+            {results.map((m) => (
+              <MovieCard key={m.id} movie={m} showSimilarity
+                isFavorite={favorites.has(m.id)}
+                onToggleFavorite={onToggleFavorite}
+              />
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 // ─── App ──────────────────────────────────────────────────────────────────────────
 function App() {
   const [activeTab, setActiveTab] = useState("chat");
   const [dark, setDark] = useDarkMode();
+  const [favorites, setFavorites] = useState(new Map());
+
+  function toggleFavorite(movie) {
+    setFavorites((prev) => {
+      const next = new Map(prev);
+      if (next.has(movie.id)) next.delete(movie.id); else next.set(movie.id, movie);
+      return next;
+    });
+  }
 
   return (
     <div className="app">
       <header className="appHeader">
         <div className="appBrand">
           <Icon name="film" size={24} className="brandSvg" />
-          <span className="brandName">MovieMatch</span>
+          <span className="brandName">CineVec</span>
         </div>
         <nav className="tabNav">
           <button className={`tabBtn${activeTab === "chat"   ? " tabBtnActive" : ""}`} onClick={() => setActiveTab("chat")}>
@@ -666,6 +785,10 @@ function App() {
           <button className={`tabBtn${activeTab === "stats"  ? " tabBtnActive" : ""}`} onClick={() => setActiveTab("stats")}>
             <Icon name="chart" size={15} />Stats
           </button>
+          <button className={`tabBtn${activeTab === "favs"   ? " tabBtnActive" : ""}`} onClick={() => setActiveTab("favs")}>
+            <Icon name="heart" size={15} />Favoritas
+            {favorites.size > 0 && <span className="favTabBadge">{favorites.size}</span>}
+          </button>
         </nav>
         <button className="darkToggle" onClick={() => setDark((v) => !v)} title={dark ? "Modo claro" : "Modo oscuro"}>
           <Icon name={dark ? "sun" : "moon"} size={18} />
@@ -673,9 +796,10 @@ function App() {
       </header>
 
       <main className="appContent">
-        {activeTab === "chat"   && <ChatTab />}
-        {activeTab === "movies" && <MoviesTab />}
+        {activeTab === "chat"   && <ChatTab favorites={favorites} onToggleFavorite={toggleFavorite} />}
+        {activeTab === "movies" && <MoviesTab favorites={favorites} onToggleFavorite={toggleFavorite} />}
         {activeTab === "stats"  && <StatsTab />}
+        {activeTab === "favs"   && <FavoritesTab favorites={favorites} onToggleFavorite={toggleFavorite} />}
       </main>
     </div>
   );

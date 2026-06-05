@@ -19,3 +19,16 @@ CREATE TABLE IF NOT EXISTS movies (
 -- Índice único para idempotencia en el ingesta
 CREATE UNIQUE INDEX IF NOT EXISTS movies_title_year_idx
     ON movies (title, release_year);
+
+-- Caché semántico: evita llamadas al LLM para queries similares
+CREATE TABLE IF NOT EXISTS query_cache (
+    id              SERIAL PRIMARY KEY,
+    query_text      TEXT        NOT NULL,
+    query_embedding VECTOR(1024) NOT NULL,
+    response        JSONB       NOT NULL,
+    created_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS query_cache_embedding_idx
+    ON query_cache USING hnsw (query_embedding vector_cosine_ops)
+    WITH (m = 16, ef_construction = 64);
