@@ -11,7 +11,6 @@ const port = Number(process.env.PORT || 3001);
 app.use(express.json());
 app.use(cors({ origin: process.env.CORS_ORIGIN || "http://localhost:5174" }));
 
-// ─── DB pool ────────────────────────────────────────────────────────────────────
 const pool = new Pool({
   host:                    process.env.PGHOST     || "localhost",
   port:                    Number(process.env.PGPORT || 5432),
@@ -23,10 +22,7 @@ const pool = new Pool({
   connectionTimeoutMillis: 5_000,
 });
 
-// ─── Cohere client ──────────────────────────────────────────────────────────────
 const cohere = new CohereClient({ token: process.env.COHERE_API_KEY });
-
-// ─── Detección de género y preambles ────────────────────────────────────────────
 
 const GENRE_KEYWORDS = {
   action:      ["acción", "accion", "action", "pelea", "lucha", "explosión", "adrenalina", "combate", "batalla"],
@@ -99,7 +95,6 @@ const GENRE_PREAMBLES = {
     "Sos un experto en cine que recomienda películas de manera conversacional y entusiasta. Respondé en español rioplatense.",
 };
 
-// Mapeo de clave interna → nombre exacto del género en la BD
 const GENRE_TO_DB_NAME = {
   action:      "Action",       adventure:   "Adventure",
   animation:   "Animation",    comedy:      "Comedy",
@@ -114,7 +109,6 @@ const GENRE_TO_DB_NAME = {
   general:     "",
 };
 
-// Mapeo de nombres de género en inglés (como están en la BD) a claves internas
 const GENRE_DB_MAP = {
   "action": "action", "adventure": "adventure", "animation": "animation",
   "comedy": "comedy", "crime": "crime", "documentary": "documentary",
@@ -146,17 +140,13 @@ const CORRECTION_STOPLIST = new Set([
   "algunos","algunas","tenes","tienes","tengo","recomendar","buscar","ver",
 ]);
 
-/**
- * Corrige typos en la query reemplazando palabras cercanas a keywords de género.
- * Devuelve la query corregida y si hubo cambios.
- */
 function correctTypos(query) {
   const words = query.toLowerCase().split(/\s+/);
   const corrections = [];
   const fixed = words.map((word) => {
     if (word.length < 4) return word;
-    if (CORRECTION_STOPLIST.has(word)) return word;   // nunca corregir palabras comunes
-    // Tolerancia escalonada: palabras más largas admiten más errores
+    if (CORRECTION_STOPLIST.has(word)) return word;
+    // tolerancia escalonada: palabras más largas admiten más errores
     const maxDist = word.length >= 8 ? 3 : word.length >= 6 ? 2 : 1;
     for (const keywords of Object.values(GENRE_KEYWORDS)) {
       for (const kw of keywords) {
@@ -179,21 +169,14 @@ function correctTypos(query) {
   return { corrected: fixed.join(" "), wasCorrected: corrections.length > 0, corrections };
 }
 
-/**
- * Detecta el género principal a partir del texto de la query.
- * Usa matching exacto primero, luego fuzzy (Levenshtein) para tolerar typos,
- * y como último recurso el género más frecuente en las películas recuperadas.
- */
 function detectGenre(query, movies = []) {
   const q     = query.toLowerCase();
   const words = q.split(/\s+/).filter((w) => w.length >= 4);
 
-  // 1. Matching exacto
   for (const [genre, keywords] of Object.entries(GENRE_KEYWORDS)) {
     if (keywords.some((kw) => q.includes(kw))) return genre;
   }
 
-  // 2. Fuzzy matching con guard de primera letra (misma tolerancia escalonada)
   for (const word of words) {
     const maxDist = word.length >= 8 ? 3 : word.length >= 6 ? 2 : 1;
     for (const [genre, keywords] of Object.entries(GENRE_KEYWORDS)) {
@@ -211,7 +194,6 @@ function detectGenre(query, movies = []) {
     }
   }
 
-  // 3. Fallback: género más frecuente entre las películas recuperadas
   const counts = {};
   for (const movie of movies) {
     for (const g of Array.isArray(movie.genres) ? movie.genres : []) {
@@ -229,7 +211,6 @@ function detectGenre(query, movies = []) {
   return mapped;
 }
 
-// ─── GET / ──────────────────────────────────────────────────────────────────────
 app.get("/", (_req, res) => {
   res.json({
     service:   "pgvector movie backend",
@@ -237,7 +218,6 @@ app.get("/", (_req, res) => {
   });
 });
 
-// ─── GET /api/health ────────────────────────────────────────────────────────────
 app.get("/api/health", async (_req, res) => {
   let client;
   try {
@@ -266,7 +246,6 @@ app.get("/api/health", async (_req, res) => {
   }
 });
 
-// ─── POST /api/chat ─────────────────────────────────────────────────────────────
 app.post("/api/chat", async (req, res) => {
   const { query, chatHistory = [] } = req.body;
 
@@ -276,11 +255,9 @@ app.post("/api/chat", async (req, res) => {
 
   let client;
   try {
-    // 1. Corregir typos antes de embedear
     const { corrected: correctedQuery, wasCorrected, corrections } = correctTypos(query.trim());
     if (wasCorrected) console.log(`[/api/chat] query corregida: "${query.trim()}" → "${correctedQuery}"`);
 
-    // 2. Embedding de la query (con la corrección aplicada)
     const embResult = await cohere.embed({
       texts:     [correctedQuery],
       model:     "embed-multilingual-v3.0",
@@ -291,7 +268,6 @@ app.post("/api/chat", async (req, res) => {
 
     client = await pool.connect();
 
-    // 2b. Semantic cache: si hay una query semánticamente similar (>= 95%), devolver cacheado
     const CACHE_THRESHOLD = 0.95;
     const cacheHit = await client.query(
       `SELECT response, 1 - (query_embedding <=> $1::vector) AS similarity
@@ -322,14 +298,11 @@ app.post("/api/chat", async (req, res) => {
       });
     }
 
-    // 3. Detectar género desde el texto (sin fallback de películas) para el filtro
     const genreForFilter  = detectGenre(correctedQuery, []);
     const dbGenreFilter   = GENRE_TO_DB_NAME[genreForFilter] || "";
     const hasGenreFilter  = dbGenreFilter !== "";
     console.log(`[/api/chat] filtro de género: "${dbGenreFilter || "ninguno"}"`);
 
-    // 4. Búsqueda híbrida con RRF (Reciprocal Rank Fusion)
-    //    Obtenemos top-20 de cada fuente y fusionamos rankings con k=60
     const safe = query.trim().replace(/[%_\\]/g, "\\$&");
     const vectorSql = `
       SELECT id, title, overview, genres, keywords,
@@ -352,7 +325,6 @@ app.post("/api/chat", async (req, res) => {
       ),
     ]);
 
-    // Fallback sin filtro de género si no hay resultados vectoriales
     let vectorRows = vectorResult.rows;
     if (vectorRows.length === 0 && hasGenreFilter) {
       console.log(`[/api/chat] sin resultados con filtro, usando búsqueda sin filtro`);
@@ -360,7 +332,6 @@ app.post("/api/chat", async (req, res) => {
       vectorRows = fallback.rows;
     }
 
-    // RRF: fusionar rankings de búsqueda vectorial y textual
     const RRF_K = 60;
     const rrfMap = new Map();
     vectorRows.forEach((m, idx) => {
@@ -390,7 +361,6 @@ app.post("/api/chat", async (req, res) => {
       });
     }
 
-    // 4b. Contexto para el LLM
     const context = movies
       .map((m, i) => {
         const genres   = Array.isArray(m.genres)   ? m.genres.join(", ")   : "N/D";
@@ -405,20 +375,17 @@ app.post("/api/chat", async (req, res) => {
       })
       .join("\n\n");
 
-    // 5. Detectar género final para el preamble (con fallback a películas si hace falta)
     const detectedGenre = genreForFilter !== "general" ? genreForFilter : detectGenre(correctedQuery, movies);
     const basePreamble  = GENRE_PREAMBLES[detectedGenre] || GENRE_PREAMBLES.general;
     const preamble      = basePreamble + " REGLA ABSOLUTA: solo recomendá películas de la lista que te pasan. Si los resultados no son relevantes para lo que busca el usuario, decilo honestamente. Nunca afirmes que un actor aparece en una película si su nombre no está en la sinopsis o keywords.";
     console.log(`[/api/chat] género detectado: ${detectedGenre}`);
 
-    // 5. Historial para Cohere (últimas 6 entradas = 3 turnos)
     const trimmedHistory = chatHistory.slice(-6);
     const cohereHistory  = trimmedHistory.map((h) => ({
       role:    h.role === "user" ? "USER" : "CHATBOT",
       message: h.message,
     }));
 
-    // 6. Llamar al LLM con historial
     const chatResponse = await cohere.chat({
       model:       "command-r-plus-08-2024",
       preamble,
@@ -426,7 +393,6 @@ app.post("/api/chat", async (req, res) => {
       message:     `El usuario busca: "${query.trim()}"\n\nPelículas encontradas por búsqueda vectorial (similitud semántica):\n\n${context}\n\nADVERTENCIA CRÍTICA: estas películas fueron encontradas por proximidad vectorial, NO porque necesariamente incluyan a "${query.trim()}". Antes de mencionar que alguien aparece en una película, verificá que su nombre figure explícitamente en la sinopsis o keywords de esa película. Si no figura, NO lo afirmes. Si ninguna película menciona a la persona buscada, decí honestamente: "No encontré películas con [nombre] en la base de datos."`,
     });
 
-    // 7. Historial actualizado para el frontend
     const updatedHistory = [
       ...trimmedHistory,
       { role: "user",      message: query.trim() },
@@ -449,7 +415,6 @@ app.post("/api/chat", async (req, res) => {
     const fmtMovies    = movies.map(fmt);
     const fmtTextMovies = textMovies.map((m) => ({ ...fmt(m), similarity: undefined }));
 
-    // 8. Guardar en semantic cache para futuras queries similares
     try {
       await client.query(
         `INSERT INTO query_cache (query_text, query_embedding, response) VALUES ($1, $2, $3)`,
@@ -484,7 +449,6 @@ app.post("/api/chat", async (req, res) => {
   }
 });
 
-// ─── GET /api/movies ────────────────────────────────────────────────────────────
 app.get("/api/movies", async (req, res) => {
   const page      = Math.max(1, parseInt(req.query.page,  10) || 1);
   const limit     = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 20));
@@ -495,7 +459,6 @@ app.get("/api/movies", async (req, res) => {
   const minRating = parseFloat(req.query.minRating)   || null;
   const offset    = (page - 1) * limit;
 
-  // Build dynamic WHERE
   const conditions   = [];
   const filterParams = [];
 
@@ -558,7 +521,6 @@ app.get("/api/movies", async (req, res) => {
   }
 });
 
-// ─── GET /api/movies/:id/similar ────────────────────────────────────────────────
 app.get("/api/movies/:id/similar", async (req, res) => {
   const id = parseInt(req.params.id, 10);
   if (!id || isNaN(id)) return res.status(400).json({ error: "ID inválido" });
@@ -595,7 +557,6 @@ app.get("/api/movies/:id/similar", async (req, res) => {
   }
 });
 
-// ─── GET /api/stats ──────────────────────────────────────────────────────────────
 app.get("/api/stats", async (_req, res) => {
   let client;
   try {
@@ -635,9 +596,6 @@ app.get("/api/stats", async (_req, res) => {
   }
 });
 
-// ─── POST /api/recommend/favorites ──────────────────────────────────────────────
-// Calcula el centroide (AVG de embeddings) de las películas favoritas del usuario
-// y devuelve las N más cercanas a ese vector promedio.
 app.post("/api/recommend/favorites", async (req, res) => {
   const { movieIds } = req.body;
   if (!Array.isArray(movieIds) || movieIds.length < 2) {
@@ -653,7 +611,6 @@ app.post("/api/recommend/favorites", async (req, res) => {
   try {
     client = await pool.connect();
 
-    // Centroide: AVG de los embeddings de las películas seleccionadas
     const centroidSql = `
       SELECT id, title, overview, genres, keywords,
              release_year, vote_average, vote_count, popularity,
@@ -691,7 +648,6 @@ app.post("/api/recommend/favorites", async (req, res) => {
   }
 });
 
-// ─── Graceful shutdown ───────────────────────────────────────────────────────────
 process.on("SIGINT",  async () => { await pool.end(); process.exit(0); });
 process.on("SIGTERM", async () => { await pool.end(); process.exit(0); });
 

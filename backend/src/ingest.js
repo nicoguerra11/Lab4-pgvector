@@ -1,13 +1,3 @@
-/**
- * ingest.js — Carga el dataset tmdb_5000_movies.csv en PostgreSQL
- * con embeddings embed-multilingual-v3.0 (1024 dims) vía Cohere SDK.
- *
- * Uso:
- *   node src/ingest.js
- *
- * Variables de entorno necesarias (igual que index.js + COHERE_API_KEY).
- */
-
 require("dotenv").config();
 
 const fs   = require("fs");
@@ -16,13 +6,11 @@ const { parse }        = require("csv-parse/sync");
 const { Pool }         = require("pg");
 const { CohereClient } = require("cohere-ai");
 
-// ─── Configuración ─────────────────────────────────────────────────────────────
-
 const DATA_PATH = process.env.DATA_PATH ||
   path.resolve(__dirname, "..", "..", "data", "tmdb_5000_movies.csv");
 
-const BATCH_SIZE   = 50;  // seguro por debajo del límite de Cohere (96)
-const BATCH_DELAY  = 6000; // ms entre batches — tier free: 100k tokens/min
+const BATCH_SIZE  = 50;
+const BATCH_DELAY = 6000; // ms entre batches — tier free de Cohere: 100k tokens/min
 
 const cohere = new CohereClient({ token: process.env.COHERE_API_KEY });
 
@@ -34,9 +22,6 @@ const pool = new Pool({
   password: process.env.PGPASSWORD || "app_password",
 });
 
-// ─── Helpers ───────────────────────────────────────────────────────────────────
-
-/** Extrae nombres de un JSON string tipo [{"id":1,"name":"Action"}, ...] */
 function parseJsonNames(jsonStr) {
   try {
     const arr = JSON.parse(jsonStr);
@@ -46,7 +31,6 @@ function parseJsonNames(jsonStr) {
   }
 }
 
-/** Construye el texto que se va a embeddear */
 function buildText(movie) {
   const genres   = parseJsonNames(movie.genres).join(", ");
   const keywords = parseJsonNames(movie.keywords).join(", ");
@@ -62,40 +46,30 @@ function buildText(movie) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/** Llama a embed-multilingual-v3.0 y devuelve array de embeddings para el batch */
 async function generateEmbeddings(texts) {
   const response = await cohere.embed({
     texts,
     model:     "embed-multilingual-v3.0",
     inputType: "search_document",
   });
-  return response.embeddings; // float[][]
+  return response.embeddings;
 }
 
-// ─── Main ──────────────────────────────────────────────────────────────────────
-
 async function main() {
-  // 1. Leer CSV
   console.log(`📂 Leyendo CSV desde ${DATA_PATH} ...`);
   const content = fs.readFileSync(DATA_PATH, "utf-8");
-  const records = parse(content, {
-    columns:           true,
-    skip_empty_lines:  true,
-    trim:              true,
-  });
+  const records = parse(content, { columns: true, skip_empty_lines: true, trim: true });
   console.log(`✅ ${records.length} películas encontradas en el CSV\n`);
 
   const db = await pool.connect();
 
   try {
-    // 2. Obtener títulos ya existentes (idempotencia)
     console.log("🔍 Verificando registros existentes en la BD...");
     const { rows } = await db.query("SELECT title FROM movies");
     const existingTitles = new Set(rows.map((r) => r.title));
 
     const toProcess = records.filter((r) => !existingTitles.has(r.title));
     const skipped   = records.length - toProcess.length;
-
     console.log(`📊 ${toProcess.length} nuevas | ${skipped} ya existen\n`);
 
     if (toProcess.length === 0) {
@@ -103,24 +77,19 @@ async function main() {
       return;
     }
 
-    // 3. Procesar en batches
     let inserted = 0;
 
     for (let i = 0; i < toProcess.length; i += BATCH_SIZE) {
-      const batch = toProcess.slice(i, i + BATCH_SIZE);
-
-      // 3a. Generar embeddings para todo el batch de una sola llamada
+      const batch      = toProcess.slice(i, i + BATCH_SIZE);
       const texts      = batch.map(buildText);
       const embeddings = await generateEmbeddings(texts);
-      await sleep(BATCH_DELAY); // respetar rate limit del tier gratuito
+      await sleep(BATCH_DELAY);
 
-      // 3b. Insertar cada película
       for (let j = 0; j < batch.length; j++) {
         const movie     = batch[j];
         const embedding = embeddings[j];
-
-        const genres   = parseJsonNames(movie.genres);
-        const keywords = parseJsonNames(movie.keywords);
+        const genres    = parseJsonNames(movie.genres);
+        const keywords  = parseJsonNames(movie.keywords);
         const releaseYear = movie.release_date
           ? parseInt(movie.release_date.split("-")[0], 10) || null
           : null;
@@ -140,42 +109,33 @@ async function main() {
               parseFloat(movie.vote_average) || null,
               parseInt(movie.vote_count, 10) || null,
               parseFloat(movie.popularity)   || null,
-              `[${embedding.join(",")}]`,   // formato que acepta pgvector
+              `[${embedding.join(",")}]`,
             ]
           );
         } catch (err) {
-          // Conflicto por título duplicado con año distinto → saltar silencioso
-          if (err.code !== "23505") throw err;
+          if (err.code !== "23505") throw err; // ignorar duplicados por título
         }
 
         inserted++;
-
-        // Progreso cada 100 películas
-        if (inserted % 100 === 0) {
-          console.log(`  → ${inserted}/${toProcess.length} insertadas...`);
-        }
+        if (inserted % 100 === 0) console.log(`  → ${inserted}/${toProcess.length} insertadas...`);
       }
     }
 
-    // Reporte final
     console.log(`\n✅ Ingesta completa: ${inserted} insertadas, ${skipped} saltadas\n`);
 
-    // 4. Crear índice ivfflat DESPUÉS de cargar los datos
     const countResult = await db.query(
       "SELECT COUNT(*) AS n FROM movies WHERE embedding IS NOT NULL"
     );
     const total = parseInt(countResult.rows[0].n, 10);
 
     if (total > 0) {
-      console.log(`🔧 Creando índice HNSW sobre ${total} vectores (m=16, ef_construction=64)...`);
-
+      console.log(`🔧 Creando índice HNSW sobre ${total} vectores...`);
       await db.query("DROP INDEX IF EXISTS movies_embedding_idx");
       await db.query(`
         CREATE INDEX movies_embedding_idx
           ON movies USING hnsw (embedding vector_cosine_ops)
           WITH (m = 16, ef_construction = 64)
       `);
-
       console.log("✅ Índice HNSW creado exitosamente");
     }
   } finally {
